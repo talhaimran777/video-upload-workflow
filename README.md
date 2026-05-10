@@ -16,6 +16,11 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## AI and YouTube configuration
+
+- **OpenAI**: set `OPENAI_API_KEY` in `.env`. Optional model variables are listed in [`.env.example`](./.env.example).
+- **YouTube (private upload from the Review section)**: configure Google OAuth and copy variables from [`.env.example`](./.env.example). Enable **YouTube Data API v3**, add redirect URI `http://localhost:3000/api/youtube/oauth/callback` (plus production URLs when deployed), and use a strong `YOUTUBE_SESSION_SECRET` (32+ characters).
+
 You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.

@@ -9,9 +9,11 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "google-auth-library": "^10.6.2",
     "next": "16.2.4",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

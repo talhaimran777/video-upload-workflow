@@ -2,52 +2,130 @@ import { NextResponse } from "next/server";
 
 const DEFAULT_MODEL = "gpt-4o-mini";
 
+/** Minimal system message: output shape only; creative/format rules come from the client. */
+const JSON_ONLY_SYSTEM =
+  "Return only valid JSON matching the schema in the user message. No markdown code fences.";
+
 function jsonResponse(data, status = 200) {
   return NextResponse.json(data, { status });
 }
 
-function buildTitlePrompt(contentType) {
-  const shorts = contentType === "shorts";
-  return `You generate YouTube metadata for CS2 / competitive gaming clips.
-Return ONLY valid JSON: {"titles":["...", ...]} with exactly 5 strings.
-Rules for each title:
-- Short, clickable, emotional, curiosity-driving (no clickbait lies).
-- Prefer active voice; hint at clutch moment, skill, or twist.
-${shorts ? "- Shorts: at most ONE emoji in the whole set of 5 (0 is ok); keep under ~60 chars each." : "- No emoji; keep punchy, under ~70 chars each."}
-- No quotes around titles, no numbering, no explanations.`;
+function normalizeTagArray(tags) {
+  if (!Array.isArray(tags)) return [];
+  return tags
+    .map((t) => String(t).trim().replace(/^#+/, ""))
+    .filter(Boolean);
 }
 
-function buildDescriptionPrompt(contentType, title) {
-  return `You write YouTube descriptions for CS2 / gaming videos.
-Return ONLY valid JSON: {"description":"..."}.
-Title (use for context): ${JSON.stringify(title)}
-Rules:
-- 2-4 short lines: hook, what happens, soft CTA (subscribe / more CS2) optional.
-- No hashtag spam in description body; plain readable lines.
-${contentType === "shorts" ? "- Punchy, Shorts-friendly pacing." : ""}`;
+/** Client sends labeled sections or legacy plain string. */
+function parseStructuredContext(context) {
+  const raw = String(context ?? "").trim();
+  if (!raw) {
+    return { clip: "", instructions: "" };
+  }
+  const lower = raw.toLowerCase();
+  const clipTag = "[clip context]";
+  const instrTag = "[regeneration instructions]";
+  const iClip = lower.indexOf(clipTag);
+  const iInstr = lower.indexOf(instrTag);
+
+  if (iInstr !== -1) {
+    const beforeInstr = raw.slice(0, iInstr).trim();
+    let clipText = beforeInstr;
+    if (iClip !== -1 && iClip < iInstr) {
+      clipText = raw
+        .slice(iClip + clipTag.length, iInstr)
+        .replace(/^\s*\n*/, "")
+        .trim();
+    } else if (iClip === -1) {
+      clipText = beforeInstr.replace(/^\s*\n*/, "").trim();
+    }
+    const instrText = raw
+      .slice(iInstr + instrTag.length)
+      .replace(/^\s*\n*/, "")
+      .trim();
+    return {
+      clip: clipText,
+      instructions: instrText,
+    };
+  }
+
+  if (iClip !== -1) {
+    return {
+      clip: raw.slice(iClip + clipTag.length).trim(),
+      instructions: "",
+    };
+  }
+
+  return { clip: raw, instructions: "" };
 }
 
-function buildTagsPrompt(contentType, title, description) {
-  return `You pick YouTube tags for CS2 / gaming videos.
-Return ONLY valid JSON: {"tags":["tag1", ...]} with 10-14 tags.
-Rules:
-- Lowercase or mixed case as typical on YouTube; include cs2, counter-strike, gaming variants where relevant.
-- Short phrases without # prefix.
+function buildTitlePrompt(clip, instructions) {
+  const blocks = [
+    `Return ONLY valid JSON: {"titles":["...","...","...","...","..."]} — exactly five strings.`,
+  ];
+  if (clip) {
+    blocks.push(`[CLIP CONTEXT]\n${JSON.stringify(clip)}`);
+  }
+  if (instructions) {
+    blocks.push(`[INSTRUCTIONS]\n${JSON.stringify(instructions)}`);
+  }
+  return blocks.join("\n\n");
+}
+
+function buildDescriptionPrompt(title, clip, instructions) {
+  const blocks = [
+    `Return ONLY valid JSON: {"description":"..."}.
+Title: ${JSON.stringify(title)}`,
+  ];
+  if (clip) {
+    blocks.push(`[CLIP CONTEXT]\n${JSON.stringify(clip)}`);
+  }
+  if (instructions) {
+    blocks.push(`[INSTRUCTIONS]\n${JSON.stringify(instructions)}`);
+  }
+  return blocks.join("\n\n");
+}
+
+function buildTagsPrompt(title, description, clip, instructions) {
+  const blocks = [
+    `Return ONLY valid JSON: {"tags":["..."]} — array of strings.
 Title: ${JSON.stringify(title)}
-Description (for context): ${JSON.stringify(description ?? "")}`;
+Description: ${JSON.stringify(description ?? "")}`,
+  ];
+  if (clip) {
+    blocks.push(`[CLIP CONTEXT]\n${JSON.stringify(clip)}`);
+  }
+  if (instructions) {
+    blocks.push(`[INSTRUCTIONS]\n${JSON.stringify(instructions)}`);
+  }
+  return blocks.join("\n\n");
 }
 
-function buildBatchPrompt(contentType, title) {
-  return `You generate YouTube description AND tags together for CS2 / gaming videos.
-Return ONLY valid JSON: {"description":"...","tags":["tag1", ...]}.
-Title: ${JSON.stringify(title)}
-Content style: ${contentType === "shorts" ? "Shorts: tight lines, energetic." : "Long-form: clear hook then detail."}
-
-Description rules:
-- 2-4 short lines, no hashtags in the description text.
-
-Tags rules:
-- 10-14 tags, CS2/gaming relevant, no # prefix.`;
+function buildBatchPrompt(
+  title,
+  clip,
+  instructionsDescription,
+  instructionsTags
+) {
+  const blocks = [
+    `Return ONLY valid JSON: {"description":"...","tags":["..."]}.
+Title: ${JSON.stringify(title)}`,
+  ];
+  if (clip) {
+    blocks.push(`[CLIP CONTEXT]\n${JSON.stringify(clip)}`);
+  }
+  if (instructionsDescription) {
+    blocks.push(
+      `[INSTRUCTIONS — DESCRIPTION]\n${JSON.stringify(instructionsDescription)}`
+    );
+  }
+  if (instructionsTags) {
+    blocks.push(
+      `[INSTRUCTIONS — TAGS]\n${JSON.stringify(instructionsTags)}`
+    );
+  }
+  return blocks.join("\n\n");
 }
 
 async function callOpenAI(system, user) {
@@ -64,7 +142,7 @@ async function callOpenAI(system, user) {
     },
     body: JSON.stringify({
       model,
-      temperature: 0.85,
+      // temperature: 0.85,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: system },
@@ -95,15 +173,14 @@ export async function POST(request) {
     return jsonResponse({ error: "Expected { type, payload }" }, 400);
   }
 
-  const contentType = payload.contentType === "shorts" ? "shorts" : "long";
+  const rawContext = String(payload.context ?? "").trim();
+  const { clip, instructions } = parseStructuredContext(rawContext);
 
   try {
     switch (type) {
       case "title": {
-        const system =
-          "You output compact JSON only. No markdown fences. English.";
-        const userPrompt = buildTitlePrompt(contentType);
-        const data = await callOpenAI(system, userPrompt);
+        const userPrompt = buildTitlePrompt(clip, instructions);
+        const data = await callOpenAI(JSON_ONLY_SYSTEM, userPrompt);
         const titles = Array.isArray(data.titles) ? data.titles : [];
         const cleaned = titles
           .map((t) => String(t).trim())
@@ -117,10 +194,8 @@ export async function POST(request) {
       case "description": {
         const title = String(payload.title ?? "").trim();
         if (!title) return jsonResponse({ error: "title required" }, 400);
-        const system =
-          "You output compact JSON only. No markdown fences. English.";
-        const userPrompt = buildDescriptionPrompt(contentType, title);
-        const data = await callOpenAI(system, userPrompt);
+        const userPrompt = buildDescriptionPrompt(title, clip, instructions);
+        const data = await callOpenAI(JSON_ONLY_SYSTEM, userPrompt);
         return jsonResponse({
           description: String(data.description ?? "").trim(),
         });
@@ -129,12 +204,14 @@ export async function POST(request) {
         const title = String(payload.title ?? "").trim();
         if (!title) return jsonResponse({ error: "title required" }, 400);
         const description = String(payload.description ?? "").trim();
-        const system =
-          "You output compact JSON only. No markdown fences. English.";
-        const userPrompt = buildTagsPrompt(contentType, title, description);
-        const data = await callOpenAI(system, userPrompt);
-        let tags = Array.isArray(data.tags) ? data.tags : [];
-        tags = tags.map((t) => String(t).trim()).filter(Boolean);
+        const userPrompt = buildTagsPrompt(
+          title,
+          description,
+          clip,
+          instructions
+        );
+        const data = await callOpenAI(JSON_ONLY_SYSTEM, userPrompt);
+        const tags = normalizeTagArray(data.tags);
         return jsonResponse({ tags });
       }
       case "batch": {
@@ -151,12 +228,24 @@ export async function POST(request) {
             400
           );
         }
-        const system =
-          "You output compact JSON only. No markdown fences. English.";
-        const userPrompt = buildBatchPrompt(contentType, title);
-        const data = await callOpenAI(system, userPrompt);
-        let tags = Array.isArray(data.tags) ? data.tags : [];
-        tags = tags.map((t) => String(t).trim()).filter(Boolean);
+        const instrDescOpt = String(
+          payload.instructionsDescription ?? ""
+        ).trim();
+        const instrTagsOpt = String(payload.instructionsTags ?? "").trim();
+        let instructionsDescription = instrDescOpt;
+        let instructionsTags = instrTagsOpt;
+        if (!instrDescOpt && !instrTagsOpt && instructions) {
+          instructionsDescription = instructions;
+          instructionsTags = instructions;
+        }
+        const userPrompt = buildBatchPrompt(
+          title,
+          clip,
+          instructionsDescription,
+          instructionsTags
+        );
+        const data = await callOpenAI(JSON_ONLY_SYSTEM, userPrompt);
+        const tags = normalizeTagArray(data.tags);
         return jsonResponse({
           description: String(data.description ?? "").trim(),
           tags,
